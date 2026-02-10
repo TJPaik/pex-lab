@@ -57,6 +57,36 @@ PYENV_VERSION=torch pyenv exec python cap_extract.py OTA_FF_992_0.gds \
   --min-cap 1e-6
 ```
 
+주요 인자 의미 (cap_extract.py):
+- `input`: 입력 파일 경로. 기본은 `polygons.txt`, `--from-gds`면 GDS로 해석.
+- `--from-gds`: GDS를 읽어 `polygons.txt`로 변환 후 진행.
+- `--polygons-out`: GDS 변환 결과 `polygons.txt` 저장 경로.
+- `--stack`: 공정 스택 JSON. 없으면 내장 sky130A 기본값 사용.
+- `--panel-size`: 패널 최대 변 길이(um). 값이 작을수록 정확도↑, 시간↑.
+- `--min-panel-size`: adaptive mesh 최저 패널 크기(um).
+- `--adaptive-mesh`: 근접도 기반으로 패널 크기 적응.
+- `--proximity-distance`: adaptive 기준 거리(um). 이보다 가까우면 더 잘게.
+- `--proximity-factor`: 근접 영역 축소 비율(0~1). 작을수록 더 촘촘.
+- `--edge-refine-factor`: 엣지 패널 크기 축소 비율(0~1).
+- `--edge-refine-fraction`: 엣지 주변에서 정밀화할 영역 비율(0~0.49).
+- `--remove-internal-faces`: 같은 net 내부 공유면 제거.
+- `--near-field-factor`: 가까운 패널을 서브샘플로 재적분(>0이면 활성).
+- `--near-field-samples`: 서브샘플 분할 수(n x n).
+- `--uniform-epsilon`: 모든 상호작용에 단일 εr 사용(층별 대신 대표값).
+- `--no-ground-plane`: 이미지 ground plane 모델 끄기.
+- `--ground-model`: `analytic`(해석 GND), `matrix`(행렬 기반 GND), `both`.
+- `--ground-net`: GND로 출력할 net 이름.
+- `--signal-scale`: net‑net 커플링 스케일(후처리 배율).
+- `--ground-scale`: GND 커플링에만 적용되는 배율.
+- `--explicit-ground-plane`: bbox 기반 GND 도체면을 물리적으로 추가.
+- `--ground-plane-layer`: explicit GND에 쓸 레이어 이름.
+- `--ground-plane-z-bottom`: explicit GND 레이어의 z_bottom(um) 강제 지정.
+- `--ground-plane-thickness`: explicit GND 두께(um).
+- `--ground-plane-margin`: bbox 여유 마진(um).
+- `--ground-plane-panel-size`: explicit GND에만 고정 패널 크기(um).
+- `--min-cap`: 출력에서 제거할 최소 커플링(fF).
+- `--match-fastercap`: FasterCap export 가정과 맞추는 프리셋.
+
 ### 2.3 FasterCap reference 생성 (ground truth)
 
 먼저 PDK 기반 stack JSON을 생성합니다.
@@ -83,6 +113,19 @@ PYENV_VERSION=torch pyenv exec python fastercap_export.py OTA_FF_992_0.gds \
   > OTA_FF_992_0_fastercap_ref_a0p01.log 2>&1
 ```
 
+주요 인자 의미 (fastercap_export.py):
+- `input`: GDS 또는 `polygons.txt` 경로(`--from-gds`로 구분).
+- `-o/--output-dir`: FasterCap 입력(.lst/.qui)과 결과 CSV 저장 폴더.
+- `--stack`: 공정 스택 JSON 경로.
+- `--panel-size`: 출력 패널 크기 힌트(현재는 FasterCap 자체 refine 사용).
+- `--run`: export 후 FasterCap을 바로 실행.
+- `--fastercap-bin`: FasterCap 실행 파일 경로.
+- `--accuracy`: FasterCap `-a` 정확도 옵션(작을수록 정확, 느림).
+- `--timeout`: FasterCap 실행 제한 시간(초).
+- `--galerkin`: FasterCap `-g`(Galerkin) 모드 사용.
+- `--csv-out`: parsed coupling CSV 출력 경로.
+- `--min-cap`: CSV에 포함할 최소 커플링(fF).
+
 생성 파일:
 - `OTA_FF_992_0_fastercap_ref_a0p01.csv` (reference 커플링 결과)
 - `OTA_FF_992_0_fastercap_ref_a0p01.log` (FasterCap 실행 로그)
@@ -104,6 +147,14 @@ PYENV_VERSION=torch pyenv exec python compare_fc_vs_bem.py \
   --scatter OTA_FF_992_0_fc_vs_bem_match3_p0p38_nf1p6_s7_e03f025.png \
   --lowcap-threshold 0.5
 ```
+
+주요 인자 의미 (compare_fc_vs_bem.py):
+- `--fastercap`: FasterCap reference CSV.
+- `--bem`: Python BEM 결과 CSV.
+- `--out-csv`: pairwise 비교 CSV 출력.
+- `--summary`: 통계 요약 텍스트 출력.
+- `--scatter`: scatter PNG 출력(없으면 `--out-csv` 기반 자동 생성).
+- `--lowcap-threshold`: low‑cap 확대 범위 기준값(fF).
 
 ---
 
@@ -138,92 +189,226 @@ PYENV_VERSION=torch pyenv exec python compare_fc_vs_bem.py \
 
 ## 4. 핵심 수학 모델과 코드 매핑
 
-## 4.1 패널 기반 BEM 기본식
+이 절은 **cap이 수학적으로 무엇인지**부터, **왜 BEM 식이 나오는지**를
+순서대로 설명합니다. 기본 가정은 정전기(DC), 선형 유전체, 완전 도체입니다.
 
-패널 `j`의 균일 전하밀도에 의해 패널 `i` 중심 전위 기여를
+### 4.1 Capacitance의 정의 (1개/2개/다도체)
 
-a. 오프대각 근사로
+가장 기본적인 정의는 전하와 전위차의 비입니다.
 
 $$
-P_{ij} = \frac{A_j}{4\pi\epsilon_0\,\bar\epsilon_{ij}\,r_{ij}} \quad (i\neq j)
+C = \frac{Q}{\Delta V}
 $$
 
-b. 대각(Self) 항은 직사각형 패널 자기 적분식으로 둡니다.
+다도체(여러 net) 문제에서는 각 도체의 전하가 모든 전위에 의해 결정되므로
+**Maxwell capacitance matrix**를 사용합니다.
 
-구현 위치:
-- 오프대각: `bem_solver.py`의 `build_coefficient_matrix()`
-- 대각(Self): `bem_solver.py`의 `_self_term_rect()`
-
-## 4.2 이미지 전하(ground plane) 모델
-
-이미지 모델을 켜면
 $$
-P_{ij} \leftarrow P_{ij} - \frac{A_j}{4\pi\epsilon_0\,\bar\epsilon_{ij}\,r'_{ij}}
+Q_i = \sum_{j=1}^{N} C_{ij} V_j
 $$
-를 적용합니다.
 
-구현 위치:
-- `bem_solver.py`의 `build_coefficient_matrix()` (`use_ground_plane`)
+여기서
 
-> FasterCap 정합 모드(`--match-fastercap`)에서는 이 항을 끕니다.
-
-## 4.3 Near-field 정밀화
-
-가까운 패널 쌍에 대해서는 소스 패널을 `n x n` subcell로 쪼개 직접 합산:
 $$
-P_{ij}^{\text{near}} \approx \sum_{k=1}^{n^2}
+C_{ij} = \frac{\partial Q_i}{\partial V_j}
+$$
+
+이고, 선형 유전체일 때 `C`는 대칭 행렬입니다. 또한
+
+$$
+U = \frac{1}{2}\sum_{i,j} C_{ij} V_i V_j
+  = \frac{1}{2}\mathbf V^{T}\mathbf C \mathbf V
+$$
+
+가 성립합니다. 커플링은 통상
+
+$$
+C^{\text{coupling}}_{ij} = -C_{ij}\quad(i\neq j)
+$$
+
+로 정의하며, GND에 대한 커플링은 행렬의 row‑sum으로 계산합니다.
+
+$$
+C_{i,\text{GND}} = C_{ii} + \sum_{j\neq i} C_{ij}
+$$
+
+코드 매핑:
+- Maxwell 행렬 생성: `bem_solver.py`의 `solve_capacitance_matrix()`
+- 커플링/그라운드 출력: `bem_solver.py`의 `extract_coupling_caps()`
+
+### 4.2 정전기 방정식과 경계조건
+
+도체 내부에는 전기장이 없고, 유전체 영역에서는 전하가 없다고 가정하면
+전위는 다음을 만족합니다.
+
+$$
+\nabla \cdot (\epsilon \nabla \phi) = 0
+$$
+
+도체 표면에서는 전위가 일정하므로
+$$
+\phi|_{S_k} = V_k
+$$
+가 됩니다. 표면 전하밀도는
+$$
+\sigma = -\epsilon \frac{\partial \phi}{\partial n}
+$$
+로 정의됩니다.
+
+이때 임의의 관측점 $\mathbf r$에서의 전위는
+표면 전하에 대한 적분으로 표현됩니다.
+
+$$
+\phi(\mathbf r) =
+\frac{1}{4\pi\epsilon_0}
+\int_S \frac{\sigma(\mathbf r')}{\epsilon_r(\mathbf r')\,|\mathbf r-\mathbf r'|}
+\,dS'
+$$
+
+이 적분식이 BEM의 출발점입니다.  
+엄밀한 다층 유전체 해석은 경계조건을 포함해 풀어야 하지만,
+이 구현은 패널 높이별 대표 $\epsilon_r$ 또는 단일 $\epsilon_r$로
+근사하여 계산 비용을 줄입니다(`--uniform-epsilon`).
+
+코드 매핑:
+- 유전율 처리: `bem_solver.py`의 `eps_at_panel`, `stack.get_effective_epsilon()`
+
+### 4.3 패널화와 BEM 행렬식
+
+도체 표면을 작은 패널로 나누고, 각 패널 내 전하밀도 $\sigma_j$를
+상수로 근사합니다. 각 패널 중심점에서 전위를 샘플링하면
+
+$$
+\phi_i \approx \sum_j P_{ij}\sigma_j
+$$
+
+이며,
+$$
+P_{ij} =
+\frac{1}{4\pi\epsilon_0}
+\int_{S_j}\frac{1}{\bar\epsilon_{ij}\,|\mathbf r_i-\mathbf r'|}\,dS'
+$$
+입니다. 패널 간 거리가 충분히 멀면 적분을 면적/거리로 근사하여
+
+$$
+P_{ij} \approx
+\frac{A_j}{4\pi\epsilon_0\,\bar\epsilon_{ij}\,r_{ij}}
+\quad (i\neq j)
+$$
+
+가 됩니다. 이 식은 **멀리 있는 패널의 전위를 점전하 근사**로 본 결과입니다.
+
+코드 매핑:
+- 오프대각 근사: `bem_solver.py`의 `build_coefficient_matrix()`
+
+### 4.4 자기항(Self‑term)과 근거리 보정
+
+자기항($i=j$)은 적분이 발산하므로 패널 형상에 대한 **정확 적분식**을 씁니다.
+직사각형 패널 중심 기준 적분 결과는
+
+$$
+I_{\text{rect}} =
+4\left(
+a\ln\frac{b+r}{a}+b\ln\frac{a+r}{b}
+\right),\quad r=\sqrt{a^2+b^2}
+$$
+
+이고,
+$$
+P_{ii} = \frac{I_{\text{rect}}}{4\pi\epsilon_0\,\epsilon_r}
+$$
+로 구현됩니다.
+
+또한 패널들이 매우 가까우면 면적/거리 근사가 부정확하므로,
+소스 패널을 `n x n`으로 쪼개 직접 합산합니다.
+
+$$
+P_{ij}^{\text{near}} \approx
+\sum_{k=1}^{n^2}
 \frac{\Delta A_k}{4\pi\epsilon_0\,\bar\epsilon_{ij}\,|\mathbf r_i-\mathbf r_{j,k}|}
 $$
 
-구현 위치:
-- `bem_solver.py`의 `_apply_near_field_correction()`
-- 옵션: `--near-field-factor`, `--near-field-samples`
+코드 매핑:
+- 자기항: `bem_solver.py`의 `_self_term_rect()`
+- 근거리 보정: `bem_solver.py`의 `_apply_near_field_correction()`
 
-## 4.4 선형계 풀이와 Maxwell 행렬
+### 4.5 이미지 전하(ground plane) 모델
 
-net `k`를 1V, 나머지를 0V로 둔 excitation 벡터 `V^{(k)}`에 대해:
-$$
-P\sigma^{(k)} = V^{(k)}
-$$
+z=0 평면을 이상적인 GND로 두면 이미지 전하를 이용해 전위를 보정할 수 있습니다.
+각 패널의 이미지 위치 $\mathbf r'_j$에 대해
 
-그 다음 net `m`의 총 전하:
 $$
-Q_m^{(k)} = \sum_{i \in m} \sigma_i^{(k)} A_i
+P_{ij} \leftarrow P_{ij} -
+\frac{A_j}{4\pi\epsilon_0\,\bar\epsilon_{ij}\,r'_{ij}}
 $$
 
-Maxwell 행렬 원소:
+를 적용합니다. FasterCap 정합 모드에서는 이 항을 끕니다.
+
+코드 매핑:
+- `bem_solver.py`의 `build_coefficient_matrix()` (`use_ground_plane`)
+
+### 4.6 선형계 풀이와 Maxwell 행렬 구성
+
+net `k`만 1V로 두고 나머지를 0V로 둔 excitation 벡터 $V^{(k)}$에 대해
+
+$$
+P\,\sigma^{(k)} = V^{(k)}
+$$
+
+를 풉니다. 그 다음 net `m`의 총 전하는
+
+$$
+Q_m^{(k)} = \sum_{i\in m} \sigma_i^{(k)} A_i
+$$
+
+이고, Maxwell 행렬 원소는
+
 $$
 C_{mk} = Q_m^{(k)}
 $$
 
-구현 위치:
+입니다. 이 과정을 모든 net에 대해 반복합니다.
+
+코드 매핑:
 - `bem_solver.py`의 `solve_capacitance_matrix()`
 
-## 4.5 커플링/그라운드 추출
+### 4.7 GND 커플링(해석 모델 vs 행렬 모델)
 
-- Net-to-net coupling:
-$$
-C_{ij}^{\text{coupling}} = -C_{ij}^{\text{Maxwell}}\quad(i\neq j)
-$$
+이 코드에서는 두 가지 GND 모델을 제공합니다.
 
-- Matrix 기반 GND row:
+1. **행렬 기반(row‑sum) GND**  
+   이미 계산한 Maxwell 행렬로부터 GND 커플링을 계산:
 $$
-C_{i,GND} = C_{ii} + \sum_{j\neq i} C_{ij}
+C_{i,\text{GND}} = C_{ii} + \sum_{j\neq i} C_{ij}
 $$
 
-구현 위치:
-- `bem_solver.py`의 `extract_coupling_caps()`
-
-## 4.6 Adaptive mesh 식
-
-사각형-사각형 최소거리 `d`를 기준으로 local panel size:
+2. **해석 기반 GND**  
+   다층 유전체 병렬‑판 모델 + 프린지 + 접합 커패시턴스:
 $$
-s_{\text{local}} = s_{\max}\left(p + (1-p)\min\left(\frac{d}{d_0},1\right)\right)
+\frac{1}{C/A} = \sum_k \frac{d_k}{\epsilon_0 \epsilon_{r,k}}
+$$
+프린지는 아래 근사식을 사용합니다.
+$$
+\frac{C_{\text{fringe}}}{L} =
+\frac{\epsilon_0\epsilon_r}{\pi}\frac{t}{h}\ln\left(1+\frac{2h}{t}\right)
 $$
 
-여기서 `p=proximity_factor`, `d0=proximity_distance`.
+코드 매핑:
+- 해석 GND: `bem_solver.py`의 `compute_ground_caps()`
+- 행렬 GND: `bem_solver.py`의 `extract_coupling_caps()`
 
-구현 위치:
+### 4.8 Adaptive mesh 식
+
+사각형 간 최소거리 `d`에 따라 local panel size를 줄이는 규칙은
+
+$$
+s_{\text{local}} =
+s_{\max}\left(p + (1-p)\min\left(\frac{d}{d_0},1\right)\right)
+$$
+
+이며, 여기서 `p=proximity_factor`, `d0=proximity_distance`입니다.
+
+코드 매핑:
 - `mesh.py`의 `_compute_adaptive_rect_panel_sizes()`
 
 ---
